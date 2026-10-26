@@ -221,4 +221,78 @@ $t2 = [System.Text.RegularExpressions.Regex]::Replace($t, $pattern, [System.Text
 if ($t2 -eq $t) { throw 'Could not locate Thumbnails.Load method; upstream may have changed.' }
 Set-Content -LiteralPath $thumbsPath -Value $t2 -Encoding UTF8
 
+
+# Diagnose and harden screenshot persistence. Save to a temporary file, decode
+# it again from disk, and only publish it at the final path after validation.
+$savePath = Join-Path $PSScriptRoot '..\upstream\src\Snapline\Core\Thumbnails.cs'
+$saveSource = Get-Content -Raw -Encoding UTF8 $savePath
+$savePattern = '(?s)public static void SavePng\(BitmapSource image, string path\)\s*\{.*?\r?\n    \}'
+$saveReplacement = @'
+public static void SavePng(BitmapSource image, string path)
+    {
+        var directory = Path.GetDirectoryName(path) ?? throw new IOException("No screenshot directory");
+        Directory.CreateDirectory(directory);
+        var temp = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
+        try
+        {
+            var encoder = new PngBitmapEncoder();
+            encoder.Frames.Add(BitmapFrame.Create(image));
+            using (var stream = new FileStream(temp, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+                encoder.Save(stream);
+
+            var info = new FileInfo(temp);
+            if (info.Length < 64) throw new IOException($"PNG output is unexpectedly small ({info.Length} bytes)");
+            var check = Thumbnails.Load(temp, int.MaxValue, 1);
+            if (check is null || check.Value.PixelWidth != image.PixelWidth || check.Value.PixelHeight != image.PixelHeight)
+                throw new IOException($"PNG verification failed; source={image.PixelWidth}x{image.PixelHeight}, file={check?.PixelWidth}x{check?.PixelHeight}");
+
+            File.Move(temp, path, true);
+            Log.Notice($"Screenshot saved and verified: {path}; bytes={new FileInfo(path).Length}; size={image.PixelWidth}x{image.PixelHeight}; format={image.Format}");
+        }
+        catch (Exception e)
+        {
+            Log.Error($"Screenshot save/verification failed: {path}; source={image.PixelWidth}x{image.PixelHeight}; {e.Message}");
+            throw;
+        }
+        finally
+        {
+            try { if (File.Exists(temp)) File.Delete(temp); } catch { }
+        }
+    }
+'@
+$saveUpdated = [System.Text.RegularExpressions.Regex]::Replace($saveSource, $savePattern, [System.Text.RegularExpressions.MatchEvaluator]{ param($m) $saveReplacement }, 1)
+if ($saveUpdated -eq $saveSource) { throw 'Could not locate Thumbnails.SavePng method; upstream may have changed.' }
+Set-Content -LiteralPath $savePath -Value $saveUpdated -Encoding UTF8
+
+# Log the actual file path, byte count, and decode outcome before adding a card.
+$appPath = Join-Path $PSScriptRoot '..\upstream\src\Snapline\AppController.cs'
+$appSource = Get-Content -Raw -Encoding UTF8 $appPath
+$oldHang = @'
+    private void HangCapture(string path, bool fromFile)
+    {
+        var thumb = Thumbnails.Load(path);
+        if (thumb is null) return;
+'@
+$newHang = @'
+    private void HangCapture(string path, bool fromFile)
+    {
+        try
+        {
+            var info = new FileInfo(path);
+            Log.Notice($"Capture received: source={(fromFile ? "watched file" : "clipboard")}; path={path}; exists={info.Exists}; bytes={(info.Exists ? info.Length : -1)}");
+        }
+        catch (Exception e) { Log.Error($"Could not inspect capture path {path}: {e.Message}"); }
+
+        var thumb = Thumbnails.Load(path);
+        if (thumb is null)
+        {
+            Log.Error($"Capture was not added because the image file could not be decoded: {path}");
+            return;
+        }
+        Log.Notice($"Capture decoded: path={path}; pixels={thumb.Value.PixelWidth}x{thumb.Value.PixelHeight}; format={thumb.Value.Image.Format}");
+'@
+if (-not $appSource.Contains($oldHang)) { throw 'Could not locate AppController.HangCapture; upstream may have changed.' }
+$appSource = $appSource.Replace($oldHang, $newHang)
+Set-Content -LiteralPath $appPath -Value $appSource -Encoding UTF8
+
 Write-Host 'Simplified Chinese patch applied.'

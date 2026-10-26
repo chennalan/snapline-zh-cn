@@ -25,7 +25,8 @@ private static string L(string en) => Language switch
         "zh-CN" when ZhCn.TryGetValue(en, out var zh) => zh,
         _ => en,
     };
-'@.TrimEnd()
+'@
+$new = $new.TrimEnd()
 if (-not $s.Contains($old)) { throw 'Could not find translation lookup method in Strings.cs.' }
 $s = $s.Replace($old, $new)
 $zh = @'

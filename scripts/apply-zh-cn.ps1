@@ -159,4 +159,66 @@ $core = Get-Content -Raw -Encoding UTF8 $settingsPath
 $core = $core.Replace('/// <summary>auto, en or ar.</summary>', '/// <summary>auto, en, ar or zh-CN.</summary>')
 Set-Content -LiteralPath $settingsPath -Value $core -Encoding UTF8
 
+
+# Make thumbnail decoding deterministic. Decode from a byte snapshot so WIC's
+# probe decoder and WPF's BitmapImage never compete for the same file stream.
+$thumbsPath = Join-Path $PSScriptRoot '..\upstream\src\Snapline\Core\Thumbnails.cs'
+if (-not (Test-Path $thumbsPath)) { throw "Expected upstream source file not found: $thumbsPath" }
+$t = Get-Content -Raw -Encoding UTF8 $thumbsPath
+$pattern = '(?s)public static Thumbnail\? Load\(string path, int maxPixels = 480, int attempts = 8\)\s*\{.*?\n    \}\n\n    public static void SavePng'
+$replacement = @'
+public static Thumbnail? Load(string path, int maxPixels = 480, int attempts = 8)
+    {
+        for (int i = 0; i < attempts; i++)
+        {
+            try
+            {
+                // Snapshot the file first. A decoder and BitmapImage sharing one
+                // file stream can leave the image source unreadable on some WIC codecs.
+                byte[] bytes = File.ReadAllBytes(path);
+                if (bytes.Length == 0) throw new IOException("empty");
+
+                int w, h;
+                using (var probe = new MemoryStream(bytes, writable: false))
+                {
+                    var decoder = BitmapDecoder.Create(probe, BitmapCreateOptions.IgnoreColorProfile, BitmapCacheOption.OnLoad);
+                    var frame = decoder.Frames[0];
+                    w = frame.PixelWidth;
+                    h = frame.PixelHeight;
+                }
+                if (w <= 0 || h <= 0) throw new IOException("no pixels");
+
+                var image = new BitmapImage();
+                image.BeginInit();
+                image.CacheOption = BitmapCacheOption.OnLoad;
+                image.CreateOptions = BitmapCreateOptions.IgnoreColorProfile;
+                image.StreamSource = new MemoryStream(bytes, writable: false);
+                if (Math.Max(w, h) > maxPixels)
+                {
+                    if (w >= h) image.DecodePixelWidth = maxPixels; else image.DecodePixelHeight = maxPixels;
+                }
+                image.EndInit();
+                image.Freeze();
+                return new Thumbnail(image, w, h);
+            }
+            catch (Exception e) when (i < attempts - 1 && (e is IOException or UnauthorizedAccessException || (i < 2 && e is NotSupportedException or FileFormatException)))
+            {
+                // A capture may still be being written; retry briefly.
+                Thread.Sleep(80 + i * 40);
+            }
+            catch (Exception e)
+            {
+                Log.Error($"Could not decode {path}: {e.Message}");
+                return null;
+            }
+        }
+        return null;
+    }
+
+    public static void SavePng
+'@
+$t2 = [System.Text.RegularExpressions.Regex]::Replace($t, $pattern, [System.Text.RegularExpressions.MatchEvaluator]{ param($m) $replacement }, 1)
+if ($t2 -eq $t) { throw 'Could not locate Thumbnails.Load method; upstream may have changed.' }
+Set-Content -LiteralPath $thumbsPath -Value $t2 -Encoding UTF8
+
 Write-Host 'Simplified Chinese patch applied.'

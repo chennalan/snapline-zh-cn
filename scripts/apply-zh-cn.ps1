@@ -165,7 +165,7 @@ Set-Content -LiteralPath $settingsPath -Value $core -Encoding UTF8
 $thumbsPath = Join-Path $PSScriptRoot '..\upstream\src\Snapline\Core\Thumbnails.cs'
 if (-not (Test-Path $thumbsPath)) { throw "Expected upstream source file not found: $thumbsPath" }
 $t = Get-Content -Raw -Encoding UTF8 $thumbsPath
-$pattern = '(?s)public static Thumbnail\? Load\(string path, int maxPixels = 480, int attempts = 8\)\s*\{.*?\n    \}\n\n    public static void SavePng'
+$pattern = '(?s)public static Thumbnail\? Load\(string path, int maxPixels = 480, int attempts = 8\)\s*\{.*?\r?\n    \}\r?\n\r?\n    public static void SavePng'
 $replacement = @'
 public static Thumbnail? Load(string path, int maxPixels = 480, int attempts = 8)
     {
